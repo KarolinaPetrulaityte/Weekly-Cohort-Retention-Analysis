@@ -1,0 +1,85 @@
+SQL code:
+-- Preparing user subscription data 
+WITH
+  main AS (
+    SELECT
+      user_pseudo_id,
+      MIN(subscription_start) AS subscriptionStart,
+      COALESCE(MAX(subscription_end), DATE '2021-02-07') AS subscriptionEnd,
+      DATE_TRUNC(MIN(subscription_start), WEEK(MONDAY)) AS cohortWeek
+    FROM `tc-da-1.turing_data_analytics.subscriptions`
+    WHERE subscription_start IS NOT NULL
+      AND user_pseudo_id IS NOT NULL
+      AND subscription_start <= DATE '2021-02-07'
+    GROUP BY user_pseudo_id
+  ),
+
+  -- Generating weeks from Week 0 to Week 6
+  weeks AS (
+    SELECT weekNumber
+    FROM UNNEST(GENERATE_ARRAY(0, 6)) AS weekNumber
+  ),
+
+  -- Counting the number of users in each cohort
+  cohortSizes AS (
+    SELECT
+      cohortWeek,
+      COUNT(DISTINCT user_pseudo_id) AS cohortSize
+    FROM main
+    GROUP BY cohortWeek
+  ),
+
+  -- Checking if users were subscribed during each week
+  userWeekActivity AS (
+    SELECT
+      main.user_pseudo_id,
+      main.cohortWeek,
+      weeks.weekNumber,
+      DATE_ADD(
+        main.cohortWeek,
+        INTERVAL weeks.weekNumber WEEK
+      ) AS activityWeekStart,
+      DATE_ADD(
+        DATE_ADD(main.cohortWeek, INTERVAL weeks.weekNumber WEEK),
+        INTERVAL 6 DAY
+      ) AS activityWeekEnd,
+      main.subscriptionStart,
+      main.subscriptionEnd
+    FROM main
+    CROSS JOIN weeks
+    -- Keeping weeks up to the analysis date
+    WHERE DATE_ADD(
+      main.cohortWeek,
+      INTERVAL weeks.weekNumber WEEK
+    ) <= DATE '2021-02-07'
+  ),
+
+  -- Counting active users for each cohort and week
+  cohortRetention AS (
+    SELECT
+      userWeekActivity.cohortWeek,
+      userWeekActivity.weekNumber,
+      cohortSizes.cohortSize,
+      COUNT(DISTINCT CASE
+        WHEN userWeekActivity.subscriptionStart <= userWeekActivity.activityWeekEnd
+          AND userWeekActivity.subscriptionEnd >= userWeekActivity.activityWeekStart
+        THEN userWeekActivity.user_pseudo_id
+      END) AS activeUsers
+    FROM userWeekActivity
+    JOIN cohortSizes
+      ON userWeekActivity.cohortWeek = cohortSizes.cohortWeek
+    GROUP BY
+      userWeekActivity.cohortWeek,
+      userWeekActivity.weekNumber,
+      cohortSizes.cohortSize
+  )
+
+SELECT
+  cohortWeek,
+  weekNumber,
+  cohortSize,
+  activeUsers,
+  -- Calculating weekly retention percentage
+  ROUND(SAFE_DIVIDE(activeUsers, cohortSize) * 100, 2) AS retention_rate_pct
+FROM cohortRetention
+ORDER BY cohortWeek, weekNumber
